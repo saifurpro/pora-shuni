@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0f7b5f">
 <title>পড়া শুনি</title>
 <style>
-:root{--bg:#f6f5f1;--card:#fff;--tx:#1d1d1b;--mut:#6b6a63;--ac:#0f7b5f;--acx:#fff;--rec:#d6382f;--bd:#e3e1d8;
+:root{--bg:#f6f5f1;--card:#fff;--tx:#1d1d1b;--mut:#6b6a63;--ac:#0f7b5f;--acx:#fff;--rec:#0f7b5f;--bd:#e3e1d8;
 box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15161a;--card:#202228;--tx:#eceae4;--mut:#9a988f;--ac:#36c39b;--acx:#08241b;--rec:#ff6b61;--bd:#32343c}}
 :root[data-theme="dark"]{--bg:#15161a;--card:#202228;--tx:#eceae4;--mut:#9a988f;--ac:#36c39b;--acx:#08241b;--rec:#ff6b61;--bd:#32343c}
@@ -53,6 +53,8 @@ button.g{background:transparent;color:var(--mut);border:1px solid var(--bd)}
 
 <div class="card recwrap">
   <input type="text" id="name" placeholder="পড়ার নাম (যেমন: বাংলা – সন্ধি)">
+  <label style="display:block;text-align:left;font-size:13px;color:var(--mut);margin-bottom:14px">🔇 নয়েজ ক্লিনিং (বাতাস/আশেপাশের শব্দ কমায়)
+    <select id="ns"><option value="0">বন্ধ</option><option value="1">হালকা</option><option value="2" selected>মাঝারি (প্রস্তাবিত)</option><option value="3">জোরালো (খুব গোলমালে)</option></select></label>
   <button id="rec" aria-label="রেকর্ড">🎙️</button>
   <div id="tm">বাটনে চাপ দিয়ে বলা শুরু করুন</div>
 </div>
@@ -99,13 +101,41 @@ d.children[2].onclick=async()=>{if(confirm('মুছে ফেলবেন?')){
 l.appendChild(d)})}
 // ---- recording ----
 let mr,chunks=[],t0,tick,stream;
+// ---- নয়েজ ক্লিনিং: হাই-পাস (বাতাসের গুমগুম) + লো-পাস + অ্যাডাপ্টিভ নয়েজ গেট + কম্প্রেসর ----
+let actx=null;
+const GATE_JS=`class G extends AudioWorkletProcessor{
+constructor(o){super();this.k=o.processorOptions.k;this.fl=0.003;this.env=0;this.hold=0;this.g=0.05;
+this.ca=1-Math.exp(-1/(0.004*sampleRate));this.cr=1-Math.exp(-1/(0.15*sampleRate));this.hb=Math.round(0.35*sampleRate/128)}
+process(i,o){const a=i[0];if(!a||!a[0])return true;const x=a[0];let s=0;for(let j=0;j<x.length;j++)s+=x[j]*x[j];
+const r=Math.sqrt(s/x.length);this.env=r>this.env?r:this.env+(r-this.env)*0.05;
+if(this.env<this.fl)this.fl=Math.max(this.env,0.0005);else this.fl+=(this.env-this.fl)*0.0001;
+if(this.env>Math.max(this.fl*this.k,0.004))this.hold=this.hb;const open=this.hold>0;if(open)this.hold--;
+const t=open?1:0.05;
+for(let j=0;j<x.length;j++){this.g+=(t-this.g)*(t>this.g?this.ca:this.cr);for(let c=0;c<a.length;c++)o[c][j]=a[c][j]*this.g}
+return true}}registerProcessor('gate',G)`;
+async function cleanStream(raw,lv){
+const P={1:{hp:90,lp:0,k:0},2:{hp:130,lp:8000,k:2.6},3:{hp:170,lp:7000,k:4.2}}[lv];
+const AC=window.AudioContext||window.webkitAudioContext;actx=new AC();if(actx.state==='suspended')await actx.resume();
+const src=actx.createMediaStreamSource(raw);let node=src;
+for(let n=0;n<2;n++){const h=actx.createBiquadFilter();h.type='highpass';h.frequency.value=P.hp;h.Q.value=0.707;node.connect(h);node=h}
+if(P.lp){const l=actx.createBiquadFilter();l.type='lowpass';l.frequency.value=P.lp;l.Q.value=0.707;node.connect(l);node=l}
+if(P.k&&actx.audioWorklet){try{const u=URL.createObjectURL(new Blob([GATE_JS],{type:'application/javascript'}));
+await actx.audioWorklet.addModule(u);URL.revokeObjectURL(u);
+const g=new AudioWorkletNode(actx,'gate',{processorOptions:{k:P.k},numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[1]});node.connect(g);node=g}catch(e){}}
+const c=actx.createDynamicsCompressor();c.threshold.value=-26;c.knee.value=18;c.ratio.value=3;c.attack.value=0.005;c.release.value=0.2;node.connect(c);
+const mk=actx.createGain();mk.gain.value=1.5;c.connect(mk);
+const d=actx.createMediaStreamDestination();mk.connect(d);return d.stream}
+try{const v=localStorage.getItem('ns');if(v!==null&&$('ns'))$('ns').value=v}catch(e){}
 function mime(){for(const m of['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg'])if(window.MediaRecorder&&MediaRecorder.isTypeSupported(m))return m;return''}
 $('rec').onclick=async()=>{
 if(mr&&mr.state==='recording'){mr.stop();return}
-try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(e){$('tm').textContent='মাইক্রোফোনের অনুমতি দিন (ব্রাউজারের অ্যাড্রেস বারে)';return}
-stop();chunks=[];const m=mime();mr=new MediaRecorder(stream,m?{mimeType:m}:undefined);
+const lv=$('ns').value;try{localStorage.setItem('ns',lv)}catch(e){}
+try{stream=await navigator.mediaDevices.getUserMedia({audio:lv==='0'?true:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}})}catch(e){$('tm').textContent='মাইক্রোফোনের অনুমতি দিন (ব্রাউজারের অ্যাড্রেস বারে)';return}
+stop();chunks=[];const m=mime();
+let recStream=stream;if(lv!=='0'){try{recStream=await cleanStream(stream,lv)}catch(e){recStream=stream}}
+mr=new MediaRecorder(recStream,m?{mimeType:m}:undefined);
 mr.ondataavailable=e=>e.data.size&&chunks.push(e.data);
-mr.onstop=async()=>{clearInterval(tick);stream.getTracks().forEach(t=>t.stop());
+mr.onstop=async()=>{clearInterval(tick);stream.getTracks().forEach(t=>t.stop());try{actx&&actx.close()}catch(e){}actx=null;
 $('rec').classList.remove('on');$('rec').textContent='🎙️';
 const blob=new Blob(chunks,{type:mr.mimeType||m||'audio/webm'});const dur=(Date.now()-t0)/1000;
 if(dur<1){$('tm').textContent='অনেক ছোট হয়েছে, আবার চেষ্টা করুন';return}
